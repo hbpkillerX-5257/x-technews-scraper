@@ -267,7 +267,8 @@ META_RE = re.compile(
     re.IGNORECASE,
 )
 TIME_RE = re.compile(
-    r"(\d+\s*(?:h|m|s|d|hour|minute|second|day)s?\s*ago|just now|yesterday)",
+    r"(\d+\s*(?:h|m|s|d|hr|hrs|hour|minute|second|day)s?\b(?:\s*ago)?"
+    r"|just now|yesterday)",
     re.IGNORECASE,
 )
 
@@ -306,15 +307,75 @@ def parse_tweet(cd):
     }
 
 
+def _node_texts(node):
+    return [c.get("text", "").strip() for c in node.iter("node")
+            if c.get("text", "").strip()]
+
+
+def _build_from_texts(texts, handle, name):
+    body = max(
+        (t for t in texts
+         if t != handle and not re.match(r"^[\d.,KkMm]+$", t)
+         and not TIME_RE.search(t)),
+        key=len, default="",
+    )
+    tm = next((t for t in texts if TIME_RE.search(t)), None)
+    return {
+        "name": name or "",
+        "handle": handle.lstrip("@"),
+        "body": body,
+        "time": tm,
+        "engagement": {},
+        "raw": " | ".join(texts[:6]),
+    }
+
+
 def extract_tweets(root):
+    """Extract tweets from either representation:
+    - legacy: full post in a node's `content-desc`
+    - current: post split across `text` nodes of a tweet card
+    """
+    parent = {c: p for p in root.iter() for c in p}
     out = []
-    for node in root.iter("node"):
-        cd = node.get("content-desc", "")
-        if not cd:
+    for n in root.iter("node"):
+        cd = n.get("content-desc", "").strip()
+        if cd:
+            t = parse_tweet(cd)
+            if t:
+                out.append(t)
             continue
-        t = parse_tweet(cd)
-        if t:
-            out.append(t)
+        t = n.get("text", "").strip()
+        if not re.match(r"^@\w+$", t):
+            continue
+        # Climb to the tweet card (ancestor holding both body and time).
+        card = n
+        last = n
+        while card is not None:
+            texts = _node_texts(card)
+            has_body = any(len(x) > 40 for x in texts)
+            has_time = any(TIME_RE.search(x) for x in texts)
+            if has_body and has_time:
+                break
+            if has_body:
+                last = card
+            card = parent.get(card)
+        if card is None:
+            card = last
+        texts = _node_texts(card)
+        if any(AD_RE.search(x) for x in texts):
+            continue  # skip promoted / ads
+        # Guess display name: last plausible short text before the handle.
+        name = ""
+        for c in card.iter("node"):
+            ct = c.get("text", "").strip()
+            if ct == t:
+                break
+            if (ct and not re.match(r"^@\w+$", ct) and not TIME_RE.search(ct)
+                    and not re.match(r"^[\d.,KkMm]+$", ct) and len(ct) <= 40):
+                name = ct
+        rec = _build_from_texts(texts, t, name)
+        if rec["body"]:
+            out.append(rec)
     return out
 
 
