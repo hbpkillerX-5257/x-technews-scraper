@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """X (Twitter) feed extractor — runs on-device (Termux) or from a host via ADB.
 
-On-device (Termux): commands run directly (uiautomator/input/wm/monkey),
-UI dump is read from /sdcard/ui.xml locally — no adb needed.
-Host mode: same commands sent over `adb -s DEVICE shell`.
+On-device (Termux): commands are sent through the phone's OWN adbd via
+`adb -s 127.0.0.1:<XS_ADB_PORT> shell` (Termux's app UID lacks the
+INJECT_EVENTS permission needed for input/uiautomator/monkey). The UI dump is
+read from /sdcard/ui.xml on the device.
+Host mode: same commands over `adb -s DEVICE shell` from a PC.
 
 Extracts structured tweets (author, handle, body, time, engagement),
 skips ads, saves raw JSON. Stage 1 of the tech-news pipeline.
 """
 import os
 import re
+import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -22,6 +25,13 @@ RAW_DIR.mkdir(exist_ok=True)
 
 DEVICE = "100.91.248.110:35111"  # used only in host mode
 
+# On-device Termux mode talks to the phone's OWN adbd over wireless debugging.
+# Termux's app UID can't run input/uiautomator/monkey directly (no INJECT_EVENTS),
+# so we route through `adb shell` to 127.0.0.1:<XS_ADB_PORT>.
+LOCAL_ADB_PORT = os.environ.get("XS_ADB_PORT", "35111")
+ADB_BIN = shutil.which("adb") or "adb"
+
+
 # Auto-detect Termux; override with XS_DEVICE=1 / XS_DEVICE=0.
 ON_DEVICE = os.environ.get("XS_DEVICE", "").lower() in ("1", "true") or (
     os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
@@ -29,13 +39,19 @@ ON_DEVICE = os.environ.get("XS_DEVICE", "").lower() in ("1", "true") or (
 
 
 def cmd(args):
-    """Run a shell command either locally (Termux) or via `adb shell`."""
+    """Run a command via `adb shell` (host or on-device-self) or locally."""
     args = list(args)
-    if ON_DEVICE:
-        full = args
+    if ON_DEVICE and shutil.which("adb"):
+        full = [ADB_BIN, "-s", f"127.0.0.1:{LOCAL_ADB_PORT}", "shell"] + args
+    elif ON_DEVICE:
+        # Fallback: direct exec (only works for non-input cmds; lacks perms).
+        full = ["sh", "-c", " ".join(args)]
     else:
         full = ["adb", "-s", DEVICE, "shell"] + args
-    return subprocess.run(full, capture_output=True, text=True)
+    r = subprocess.run(full, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"[cmd err] {' '.join(args)} -> {r.stderr.strip()[:200]}")
+    return r
 
 
 def wm_size():
@@ -154,7 +170,8 @@ def extract_tweets(root):
 
 
 def run(scrolls=8, tab="For you"):
-    print(f"[mode: {'ON-DEVICE (Termux)' if ON_DEVICE else f'host via {DEVICE}'}]")
+    mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {DEVICE}"
+    print(f"[mode: {mode}]")
     w, h = wm_size()
     launch_x()
     if tab:

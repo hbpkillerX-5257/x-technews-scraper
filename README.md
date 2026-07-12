@@ -34,14 +34,33 @@ rewrite.py   ──►  articles/<ts>_<slug>.md  +  articles/index.md
   works from Termux directly once the app is open.
 
 ## 2. Setup (Termux — recommended, 24/7)
+
+Termux's app sandbox **cannot** run `input` / `uiautomator` / `monkey` directly
+(no `INJECT_EVENTS` permission). The fix: install `adb` in Termux and drive the
+phone's *own* wireless-debugging adbd (`127.0.0.1:<port>`), which runs as the
+privileged `shell` user.
+
 ```bash
-pkg update && pkg install python git
+pkg update && pkg install python git android-tools
 pip install requests
-termux-setup-storage          # grant storage permission
+termux-setup-storage                      # grant storage permission
 git clone <repo-url> x_scrapper
 cd x_scrapper
+cp .env.example .env                      # add your XS_API_KEY
 ```
-Open the X app and log in (leave it on the "For you" tab), then run:
+
+Enable **Developer options → Wireless debugging** on the phone, then pair &
+connect adb to the device itself (split-screen Settings + Termux helps):
+```bash
+adb pair 127.0.0.1:<pair-port> <code>    # 6-digit code from Wireless debugging
+adb connect 127.0.0.1:<conn-port>        # "IP address & Port" shown in settings
+export XS_ADB_PORT=<conn-port>           # e.g. 35111
+adb devices                              # should list 127.0.0.1:<conn-port>
+```
+Pairing persists; the connection drops on reboot / screen lock (re-run
+`adb connect`). Put the `export XS_ADB_PORT=...` in your shell rc for 24/7.
+
+Open the X app, logged in, on the "For you" tab, then:
 ```bash
 python3 extract.py 8        # scrape 8 scrolls of the feed
 python3 rewrite.py          # turn the latest scrape into articles
@@ -55,7 +74,8 @@ Force host mode with:
 ```bash
 XS_DEVICE=0 python3 extract.py 8
 ```
-On-device mode is auto-detected via Termux's `PREFIX` env var.
+On-device mode is auto-detected via Termux's `PREFIX` env var, and uses the
+local `adb` binary against `127.0.0.1:$XS_ADB_PORT`.
 
 ## 3. Configuration
 Secrets live in a `.env` file (gitignored). Copy the template and fill in:
