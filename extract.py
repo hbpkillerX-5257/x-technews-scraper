@@ -23,7 +23,7 @@ PROJECT = Path(__file__).resolve().parent
 RAW_DIR = PROJECT / "raw"
 RAW_DIR.mkdir(exist_ok=True)
 
-DEVICE = "100.91.248.110:35111"  # used only in host mode
+DEVICE = os.environ.get("XS_DEVICE", "100.91.248.110:35111")  # host mode target
 
 # On-device Termux mode talks to the phone's OWN adbd over wireless debugging.
 # Termux's app UID can't run input/uiautomator/monkey directly (no INJECT_EVENTS),
@@ -52,6 +52,23 @@ def cmd(args):
     if r.returncode != 0:
         print(f"[cmd err] {' '.join(args)} -> {r.stderr.strip()[:200]}")
     return r
+
+
+def adb_connected():
+    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    return any(DEVICE in line and "device" in line for line in out.splitlines())
+
+
+def ensure_connected():
+    """Host mode: reconnect if adb dropped (wireless debugging is flaky)."""
+    if ON_DEVICE:
+        return True
+    if adb_connected():
+        return True
+    print(f"[adb] {DEVICE} not connected, reconnecting...")
+    subprocess.run(["adb", "connect", DEVICE], capture_output=True, text=True)
+    time.sleep(2)
+    return adb_connected()
 
 
 def wm_size():
@@ -184,6 +201,8 @@ def extract_tweets(root):
 def run(scrolls=8, tab="For you"):
     mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {DEVICE}"
     print(f"[mode: {mode}]")
+    if not ON_DEVICE and not ensure_connected():
+        raise SystemExit(f"Cannot reach {DEVICE}. Check wireless debugging / USB.")
     # Keep the display on and wake it so wm/uiautomator/input have a window.
     cmd(["input", "keyevent", "KEYCODE_WAKEUP"])
     cmd(["svc", "power", "stayon", "true"])
@@ -194,6 +213,8 @@ def run(scrolls=8, tab="For you"):
         time.sleep(3)
     seen = {}
     for i in range(scrolls + 1):
+        if not ON_DEVICE:
+            ensure_connected()
         root = dump_ui()
         if root is not None:
             for t in extract_tweets(root):

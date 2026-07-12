@@ -70,15 +70,35 @@ phone **plugged in**. Ensure X is the foreground app (no screen lock) — if the
 screen is off/locked, `uiautomator`/`wm` can't find a window and the run fails.
 Articles land in `articles/` with an `index.md`.
 
-### Host mode (run from a PC instead)
-If you prefer running from a laptop, keep the phone connected over wireless
-debugging and set the device serial in `extract.py` (`DEVICE = "ip:port"`).
-Force host mode with:
+### Host mode (run from a laptop — recommended)
+The most reliable setup is **USB**: plug the phone in and adb stays connected
+(no drops, no port changes).
+
+For **wireless**, the randomly-assigned Wireless-debugging port changes on every
+reboot, which is what causes the disconnects. Pin a fixed port instead:
+
 ```bash
-XS_DEVICE=0 python3 extract.py 8
+# 1. Plug in via USB once, then:
+adb tcpip 5555                 # phone now listens on TCP 5555 (fixed)
+# 2. Unplug, find the phone's IP (Settings > About > IP), then:
+adb connect 192.168.x.x:5555
+# 3. Tell the script which device to use (env override, no code edit):
+export XS_DEVICE=192.168.x.x:5555
+python3 extract.py 8 && python3 rewrite.py
 ```
-On-device mode is auto-detected via Termux's `PREFIX` env var, and uses the
-local `adb` binary against `127.0.0.1:$XS_ADB_PORT`.
+
+Tips for stability:
+- Give the phone a **static IP** (or reserve one in your router) so the address
+  doesn't change.
+- The script **auto-reconnects** if adb drops mid-run (`ensure_connected()`
+  re-runs `adb connect $XS_DEVICE` before each scroll).
+- `adb tcpip 5555` survives normal use but resets after a **reboot** — just
+  redo step 1 over USB once, then reconnect.
+- Keep the screen **on and unlocked** (the script runs `svc power stayon true`
+  and wakes it, but a secure lock will still block `uiautomator`).
+
+`ON_DEVICE` is auto-detected via Termux's `PREFIX`; from a laptop it defaults to
+host mode. Force host mode explicitly with `XS_DEVICE=0`.
 
 ## 3. Configuration
 Secrets live in a `.env` file (gitignored). Copy the template and fill in:
