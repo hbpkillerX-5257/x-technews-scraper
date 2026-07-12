@@ -90,7 +90,19 @@ def tap_content_desc(target, timeout=8):
 
 def dump_ui():
     cmd(["uiautomator", "dump", "/sdcard/ui.xml"])
-    p = Path("/sdcard/ui.xml") if ON_DEVICE else Path("/tmp/opencode/x_ui.xml")
+    if ON_DEVICE and shutil.which("adb"):
+        # Stream the dump over adb (exec-out) to avoid Termux storage-permission
+        # issues reading /sdcard directly.
+        r = subprocess.run(
+            [ADB_BIN, "-s", f"127.0.0.1:{LOCAL_ADB_PORT}", "exec-out",
+             "cat", "/sdcard/ui.xml"],
+            capture_output=True,
+        )
+        try:
+            return ET.fromstring(r.stdout)
+        except ET.ParseError:
+            return None
+    p = Path("/tmp/opencode/x_ui.xml")
     if not ON_DEVICE:
         subprocess.run(["adb", "-s", DEVICE, "pull", "/sdcard/ui.xml", str(p)],
                        capture_output=True)
@@ -172,6 +184,9 @@ def extract_tweets(root):
 def run(scrolls=8, tab="For you"):
     mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {DEVICE}"
     print(f"[mode: {mode}]")
+    # Keep the display on and wake it so wm/uiautomator/input have a window.
+    cmd(["input", "keyevent", "KEYCODE_WAKEUP"])
+    cmd(["svc", "power", "stayon", "true"])
     w, h = wm_size()
     launch_x()
     if tab:

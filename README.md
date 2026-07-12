@@ -65,6 +65,9 @@ Open the X app, logged in, on the "For you" tab, then:
 python3 extract.py 8        # scrape 8 scrolls of the feed
 python3 rewrite.py          # turn the latest scrape into articles
 ```
+The script auto-wakes the screen and runs `svc power stayon true`, so keep the
+phone **plugged in**. Ensure X is the foreground app (no screen lock) — if the
+screen is off/locked, `uiautomator`/`wm` can't find a window and the run fails.
 Articles land in `articles/` with an `index.md`.
 
 ### Host mode (run from a PC instead)
