@@ -151,29 +151,32 @@ def adb_connected():
 
 
 def ensure_connected():
-    """Host mode: reconnect if adb dropped (wireless debugging is flaky)."""
+    """Host mode: reconnect if adb dropped (wireless debugging is flaky).
+
+    Tries, in order: the resolved/cached target, an mDNS-rediscovered port,
+    and the common pinned tcpip port (after `adb tcpip 5555`).
+    """
     global ACTIVE_DEVICE
     if ON_DEVICE:
         return True
     if adb_connected():
         return True
-    target = get_device() or _load_target() or os.environ.get("XS_DEVICE")
-    if target:
-        print(f"[adb] {target} not connected, reconnecting...")
-        subprocess.run(["adb", "connect", target], capture_output=True, text=True)
+    cands = []
+    t = get_device() or _load_target() or os.environ.get("XS_DEVICE")
+    if t:
+        cands.append(t)
+    md = discover_adb_mdns()
+    if md:
+        cands.append(md)
+    cands.append(f"{ADB_IP}:5555")  # pinned tcpip port
+    for c in cands:
+        print(f"[adb] trying {c} ...")
+        subprocess.run(["adb", "connect", c], capture_output=True, text=True)
         time.sleep(2)
         ACTIVE_DEVICE = None  # re-resolve after connect
         if adb_connected():
+            _save_target(c)
             return True
-    # Port may have changed (wireless debugging randomises it) -> rediscover.
-    md = discover_adb_mdns()
-    if md:
-        print(f"[adb] rediscovered device at {md}")
-        _save_target(md)
-        ACTIVE_DEVICE = None
-        subprocess.run(["adb", "connect", md], capture_output=True, text=True)
-        time.sleep(2)
-        return adb_connected()
     print("[adb] not connected. Run: adb connect <phone-ip>:<port> "
           "(port from phone's Wireless debugging settings), then retry.")
     return False
@@ -316,10 +319,10 @@ def extract_tweets(root):
 
 
 def run(scrolls=8, tab="For you"):
-    mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {get_device()}"
-    print(f"[mode: {mode}]")
     if not ON_DEVICE and not ensure_connected():
         raise SystemExit("Cannot reach device. Check wireless debugging / USB.")
+    mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {get_device()}"
+    print(f"[mode: {mode}]")
     # Keep the display on and wake it so wm/uiautomator/input have a window.
     cmd(["input", "keyevent", "KEYCODE_WAKEUP"])
     cmd(["svc", "power", "stayon", "true"])
