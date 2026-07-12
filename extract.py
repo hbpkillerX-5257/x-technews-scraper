@@ -137,6 +137,15 @@ def scroll_up(w, h, frac=0.75):
     time.sleep(2)
 
 
+def refresh_feed(w, h):
+    """Pull-to-refresh at the top of the feed (drag downward)."""
+    x = w // 2
+    y1 = int(h * 0.12)
+    y2 = int(h * 0.45)
+    cmd(["input", "swipe", str(x), str(y1), str(x), str(y2), "600"])
+    time.sleep(1)
+
+
 AD_RE = re.compile(r"\b(promoted|advertisement|ad\s*·|sponsored)\b", re.IGNORECASE)
 META_RE = re.compile(
     r"\s+(\d+\s*(?:second|minute|hour|day|s|m|h|d)?\s*ago"
@@ -211,6 +220,10 @@ def run(scrolls=8, tab="For you"):
     if tab:
         tap_content_desc(tab)
         time.sleep(3)
+    # Refresh the feed, then wait for it to load before scraping.
+    refresh_feed(w, h)
+    print("feed refreshed, waiting 60s for load...")
+    time.sleep(60)
     seen = {}
     for i in range(scrolls + 1):
         if not ON_DEVICE:
