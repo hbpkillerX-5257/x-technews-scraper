@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+run*.log
+raw/
+articles/
+.env
