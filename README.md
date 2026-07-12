@@ -24,6 +24,7 @@ rewrite.py   ──►  articles/<ts>_<slug>.md  +  articles/index.md
 - **Skips ads** (Promoted / Sponsored / Advertisement).
 - De-duplicates posts.
 - Filters to tech-relevant posts and groups them into stories.
+- *(Optional, experimental)* comment scraping — see [Notes](#4-notes--limitations).
 
 ---
 
@@ -35,12 +36,35 @@ rewrite.py   ──►  articles/<ts>_<slug>.md  +  articles/index.md
 - The phone must allow UI automation (`input` / `uiautomator`). On a Pixel this
   works from Termux directly once the app is open.
 
-## 2. Setup (Termux — recommended, 24/7)
+## 2. Setup
 
-Termux's app sandbox **cannot** run `input` / `uiautomator` / `monkey` directly
-(no `INJECT_EVENTS` permission). The fix: install `adb` in Termux and drive the
-phone's *own* wireless-debugging adbd (`127.0.0.1:<port>`), which runs as the
-privileged `shell` user.
+> **Recommended: run from a laptop** (host mode) with the phone connected over
+> USB (`adb usb`) or a pinned wireless port (`adb tcpip 5555`). Termux *can* work
+> but its app sandbox **cannot** run `input` / `uiautomator` / `monkey` directly
+> (no `INJECT_EVENTS`), so it must instead drive the phone's own adbd at
+> `127.0.0.1:<port>`. Host mode is simpler and more reliable.
+
+### Laptop (host) mode — recommended
+```bash
+pip install requests zeroconf
+git clone <repo-url> x_scrapper && cd x_scrapper
+cp .env.example .env                 # add your XS_API_KEY
+adb connect 100.91.248.110:5555     # see "pinned port" tip below
+python3 extract.py 8 && python3 rewrite.py
+```
+The script auto-discovers the phone via mDNS and falls back to `:5555`, so a
+plain `python3 extract.py 8` usually just works once the phone is connected.
+
+### Termux (on-device) mode
+Termux's sandbox can't run `input`/`uiautomator`/`monkey` directly. Install
+`adb` in Termux and drive the phone's *own* wireless-debugging adbd:
+```bash
+pkg update && pkg install python git android-tools
+pip install requests zeroconf
+termux-setup-storage
+export XS_ADB_PORT=<conn-port>       # e.g. 35111 from Wireless debugging
+adb connect 127.0.0.1:<conn-port>
+```
 
 ```bash
 pkg update && pkg install python git android-tools
@@ -112,15 +136,23 @@ cp .env.example .env
 `rewrite.py` reads these via env (`XS_API_KEY`, `XS_BASE_URL`, `XS_MODEL`).
 You may also export them in the shell instead of using `.env`.
 
-`extract.py` settings:
-```python
-DEVICE = "100.91.248.110:35111"  # host mode only
-# ON_DEVICE auto-detects Termux; override with XS_DEVICE=1 / XS_DEVICE=0
+`extract.py` settings (env vars, no code edits needed):
+```bash
+XS_DEVICE=100.91.248.110:5555   # override auto-detected target (host mode)
+XS_ADB_PORT=35111                # Termux self-adb port (ON_DEVICE only)
+XS_COMMENT_TOP=0                 # tweets to try comment-scraping on (0=off;
+                                 # the current X app rarely exposes replies)
 ```
+`ON_DEVICE` is auto-detected via Termux's `PREFIX`; from a laptop it's host mode.
 
 ## 4. Notes / limitations
 - Promoted posts are filtered; reply/quote posts may still appear (easy to add).
 - Some link/CTA text can leak into a post body — minor cleanup pending.
 - `uiautomator` selectors can break when X updates its app; re-run after updates.
+- **Comments:** `scrape_comments()` opens a tweet and reads replies via
+  `uiautomator`. On the current X app, reply authors are generally **not exposed**
+  in the accessibility hierarchy (the detail view returns only the original post,
+  and can hang `uiautomator` dumps on video/complex threads). So it's **off by
+  default**; set `XS_COMMENT_TOP=3` to attempt it — expect frequent empty results.
 - For video output (future), the same `raw/` JSON feeds both articles and a
   later video stage.

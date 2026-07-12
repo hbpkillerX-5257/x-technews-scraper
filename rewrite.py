@@ -79,9 +79,13 @@ def build_prompt(tweets):
     for i, t in enumerate(tweets):
         eng = t.get("engagement", {})
         eng_s = ", ".join(f"{k}={v}" for k, v in eng.items()) or "n/a"
-        lines.append(
-            f"[{i}] @{t['handle']} ({t.get('name','')}) | {t.get('time','')} | {eng_s}\n{t['body']}"
-        )
+        blk = f"[{i}] @{t['handle']} ({t.get('name','')}) | {t.get('time','')} | {eng_s}\n{t['body']}"
+        comments = t.get("comments") or []
+        if comments:
+            blk += "\nTop comments:\n" + "\n".join(
+                f"  - @{c['handle']}: {c['body'][:160]}" for c in comments[:3]
+            )
+        lines.append(blk)
     feed = "\n\n".join(lines)
     system = (
         "You are a tech-news editor. You receive raw posts scraped from an "
@@ -92,6 +96,8 @@ def build_prompt(tweets):
         "2. Group related posts into coherent stories.\n"
         "3. Write clean, factual tech-news articles (markdown body). Attribute "
         "sources by @handle at the end.\n"
+        "4. You may reference notable 'Top comments' to add context, but keep "
+        "the article factual and attribute opinions to the commenter.\n"
         "Output STRICTLY a JSON array (no prose, no code fences). Each item:\n"
         "{\"headline\": str, \"category\": str, \"summary\": str, "
         "\"body\": str (markdown, 2-4 short paragraphs), "

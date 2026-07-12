@@ -40,6 +40,12 @@ ON_DEVICE = os.environ.get("XS_DEVICE", "").lower() in ("1", "true") or (
     os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
 )
 
+# How many top-by-engagement tweets to open and scrape replies for (0 = off).
+# How many top tweets (by visible position) to attempt comment scraping on.
+# Default 0: the current X app rarely exposes reply authors via uiautomator,
+# and the detail view can hang dumps, so leave it off unless you want to try.
+COMMENT_TOP_N = int(os.environ.get("XS_COMMENT_TOP", "0"))
+
 
 def _save_target(t):
     try:
@@ -126,7 +132,7 @@ def get_device():
     return ACTIVE_DEVICE
 
 
-def cmd(args):
+def cmd(args, timeout=None):
     """Run a command via `adb shell` (host or on-device-self) or locally."""
     args = list(args)
     if ON_DEVICE and shutil.which("adb"):
@@ -136,7 +142,11 @@ def cmd(args):
         full = ["sh", "-c", " ".join(args)]
     else:
         full = ["adb", "-s", get_device(), "shell"] + args
-    r = subprocess.run(full, capture_output=True, text=True)
+    try:
+        r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[cmd timeout] {' '.join(args)}")
+        return subprocess.CompletedProcess(full, -1, "", "")
     if r.returncode != 0:
         print(f"[cmd err] {' '.join(args)} -> {r.stderr.strip()[:200]}")
     return r
@@ -217,7 +227,10 @@ def tap_content_desc(target, timeout=8):
 
 
 def dump_ui():
-    cmd(["uiautomator", "dump", "/sdcard/ui.xml"])
+    # uiautomator dump can hang on the X detail view (video/complex tweets);
+    # the timeout keeps the pipeline from freezing. A None return means
+    # "skip this scrape step" rather than aborting the whole run.
+    cmd(["uiautomator", "dump", "/sdcard/ui.xml"], timeout=25)
     if ON_DEVICE and shutil.which("adb"):
         # Stream the dump over adb (exec-out) to avoid Termux storage-permission
         # issues reading /sdcard directly.
@@ -225,6 +238,7 @@ def dump_ui():
             [ADB_BIN, "-s", f"127.0.0.1:{LOCAL_ADB_PORT}", "exec-out",
              "cat", "/sdcard/ui.xml"],
             capture_output=True,
+            timeout=25,
         )
         try:
             return ET.fromstring(r.stdout)
@@ -233,7 +247,7 @@ def dump_ui():
     p = Path("/tmp/opencode/x_ui.xml")
     if not ON_DEVICE:
         subprocess.run(["adb", "-s", get_device(), "pull", "/sdcard/ui.xml", str(p)],
-                       capture_output=True)
+                       capture_output=True, timeout=25)
     try:
         return ET.parse(p).getroot()
     except ET.ParseError:
@@ -255,6 +269,75 @@ def refresh_feed(w, h):
     y2 = int(h * 0.45)
     cmd(["input", "swipe", str(x), str(y1), str(x), str(y2), "600"])
     time.sleep(1)
+
+
+def _overlap(a, b):
+    return (a or "")[:40] in (b or "") or (b or "")[:40] in (a or "")
+
+
+def _eng_score(t):
+    return sum((t.get("engagement", {}) or {}).values())
+
+
+def tap_bounds(bounds):
+    m = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
+    if not m:
+        return False
+    x = (int(m.group(1)) + int(m.group(3))) // 2
+    y = (int(m.group(2)) + int(m.group(4))) // 2
+    cmd(["input", "tap", str(x), str(y)])
+    return True
+
+
+def scroll_down(w, h, frac=0.25):
+    """Swipe down (reveal content toward the top of the list)."""
+    x = w // 2
+    y1 = int(h * frac)
+    y2 = int(h * 0.7)
+    cmd(["input", "swipe", str(x), str(y1), str(x), str(y2), "350"])
+    time.sleep(2)
+
+
+def goto_top(w, h):
+    for _ in range(12):
+        scroll_down(w, h)
+
+
+def scrape_comments(bounds, w, h, orig=None, scrolls=4):
+    """Open a tweet (by its card bounds) and collect replies.
+
+    NOTE: On the current X app, reply authors are generally NOT exposed in
+    the accessibility hierarchy (uiautomator dump returns only the original
+    post, or hangs on video/complex threads). So this frequently returns [].
+    It is best-effort and wrapped so a failure never aborts the run.
+    """
+    try:
+        if not tap_bounds(bounds):
+            return []
+        time.sleep(3)
+        seen = {}
+        for _ in range(scrolls):
+            root = dump_ui()
+            if root is not None:
+                for c in extract_tweets(root):
+                    if orig and c["handle"] == orig["handle"] and _overlap(c["body"], orig["body"]):
+                        continue  # skip the original post itself
+                    if AD_RE.search(c.get("raw", "")) or AD_RE.search(c["body"]):
+                        continue
+                    key = (c["handle"], c["body"])
+                    if key not in seen:
+                        seen[key] = c
+            scroll_up(w, h)
+        cmd(["input", "keyevent", "4"])  # back to feed
+        time.sleep(2)
+        return list(seen.values())
+    except Exception as e:
+        print(f"[comments] skipped: {e}")
+        try:
+            cmd(["input", "keyevent", "4"])
+        except Exception:
+            pass
+        return []
 
 
 AD_RE = re.compile(r"\b(promoted|advertisement|ad\s*·|sponsored)\b", re.IGNORECASE)
@@ -342,6 +425,7 @@ def extract_tweets(root):
         if cd:
             t = parse_tweet(cd)
             if t:
+                t["bounds"] = n.get("bounds", "")
                 out.append(t)
             continue
         t = n.get("text", "").strip()
@@ -375,6 +459,7 @@ def extract_tweets(root):
                 name = ct
         rec = _build_from_texts(texts, t, name)
         if rec["body"]:
+            rec["bounds"] = card.get("bounds", "")
             out.append(rec)
     return out
 
@@ -409,6 +494,18 @@ def run(scrolls=8, tab="For you"):
         print(f"scroll {i}: {len(seen)} unique tweets so far")
         if i < scrolls:
             scroll_up(w, h)
+    # Scrape replies for the top-N tweets currently visible at the feed top
+    # (their captured bounds are valid there).
+    if COMMENT_TOP_N > 0:
+        goto_top(w, h)
+        root = dump_ui()
+        visible = extract_tweets(root) if root is not None else []
+        for v in sorted(visible, key=_eng_score, reverse=True)[:COMMENT_TOP_N]:
+            if not v.get("bounds"):
+                continue
+            print(f"scraping comments for @{v['handle']} ...")
+            v["comments"] = scrape_comments(v["bounds"], w, h, orig=v)
+
     tweets = list(seen.values())
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = RAW_DIR / f"tweets_{stamp}.json"
