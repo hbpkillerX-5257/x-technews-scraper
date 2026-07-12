@@ -30,6 +30,8 @@ rewrite.py   ──►  articles/<ts>_<slug>.md  +  articles/index.md
 ## 1. Requirements
 - Android phone with the **X app installed and logged in**.
 - **Termux** (F-Droid) with SSH, or any machine with `adb` + Python 3.
+- Python deps: `requests` (rewriter) and `zeroconf` (optional; enables
+  automatic discovery of the phone's changing wireless-debugging port).
 - The phone must allow UI automation (`input` / `uiautomator`). On a Pixel this
   works from Termux directly once the app is open.
 
@@ -42,7 +44,7 @@ privileged `shell` user.
 
 ```bash
 pkg update && pkg install python git android-tools
-pip install requests
+pip install requests zeroconf
 termux-setup-storage                      # grant storage permission
 git clone <repo-url> x_scrapper
 cd x_scrapper
@@ -74,31 +76,32 @@ Articles land in `articles/` with an `index.md`.
 The most reliable setup is **USB**: plug the phone in and adb stays connected
 (no drops, no port changes).
 
-For **wireless**, the randomly-assigned Wireless-debugging port changes on every
-reboot, which is what causes the disconnects. Pin a fixed port instead:
+For **wireless**, the Wireless-debugging port randomises every session (e.g.
+yesterday `:35111`, today `:43921`). The script **auto-discovers the current
+port via mDNS**, so you don't need to track it:
 
 ```bash
-# 1. Plug in via USB once, then:
-adb tcpip 5555                 # phone now listens on TCP 5555 (fixed)
-# 2. Unplug, find the phone's IP (Settings > About > IP), then:
-adb connect 192.168.x.x:5555
-# 3. Tell the script which device to use (env override, no code edit):
-export XS_DEVICE=192.168.x.x:5555
+pip install zeroconf          # enables automatic port discovery
 python3 extract.py 8 && python3 rewrite.py
 ```
+- If `zeroconf` isn't installed (or mDNS is blocked on your network), set the
+  port manually: `export XS_DEVICE=192.168.x.x:43921` (from the phone's
+  Wireless debugging "IP address & Port").
+- If the connection drops mid-run, `ensure_connected()` re-runs `adb connect`
+  and, if that still fails, **rediscovers the new port over mDNS** before each
+  scroll.
+
+Prefer a fixed port? Pin one with `adb tcpip 5555` (once, over USB), then
+`adb connect 192.168.x.x:5555` — it survives normal use (resets only on reboot).
 
 Tips for stability:
 - Give the phone a **static IP** (or reserve one in your router) so the address
   doesn't change.
-- The script **auto-reconnects** if adb drops mid-run (`ensure_connected()`
-  re-runs `adb connect $XS_DEVICE` before each scroll).
-- `adb tcpip 5555` survives normal use but resets after a **reboot** — just
-  redo step 1 over USB once, then reconnect.
 - Keep the screen **on and unlocked** (the script runs `svc power stayon true`
   and wakes it, but a secure lock will still block `uiautomator`).
 
 `ON_DEVICE` is auto-detected via Termux's `PREFIX`; from a laptop it defaults to
-host mode. Force host mode explicitly with `XS_DEVICE=0`.
+host mode.
 
 ## 3. Configuration
 Secrets live in a `.env` file (gitignored). Copy the template and fill in:

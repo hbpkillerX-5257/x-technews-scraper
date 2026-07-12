@@ -13,6 +13,7 @@ skips ads, saves raw JSON. Stage 1 of the tech-news pipeline.
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -23,19 +24,106 @@ PROJECT = Path(__file__).resolve().parent
 RAW_DIR = PROJECT / "raw"
 RAW_DIR.mkdir(exist_ok=True)
 
-DEVICE = os.environ.get("XS_DEVICE", "100.91.248.110:35111")  # host mode target
-
 # On-device Termux mode talks to the phone's OWN adbd over wireless debugging.
 # Termux's app UID can't run input/uiautomator/monkey directly (no INJECT_EVENTS),
 # so we route through `adb shell` to 127.0.0.1:<XS_ADB_PORT>.
 LOCAL_ADB_PORT = os.environ.get("XS_ADB_PORT", "35111")
 ADB_BIN = shutil.which("adb") or "adb"
+# Base IP used to recognise the phone when auto-discovering the device.
+ADB_IP = os.environ.get("XS_ADB_IP", "100.91.248.110")
+ADB_TARGET_FILE = PROJECT / ".adb_target"   # remembers last-known ip:port
+ACTIVE_DEVICE = None
 
 
 # Auto-detect Termux; override with XS_DEVICE=1 / XS_DEVICE=0.
 ON_DEVICE = os.environ.get("XS_DEVICE", "").lower() in ("1", "true") or (
     os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
 )
+
+
+def _save_target(t):
+    try:
+        ADB_TARGET_FILE.write_text(t)
+    except OSError:
+        pass
+
+
+def _load_target():
+    try:
+        return ADB_TARGET_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def discover_adb_mdns(timeout=8):
+    """Find the phone's current wireless-debugging ip:port via mDNS.
+
+    Android advertises its wireless-debugging service over mDNS, so the port
+    (which randomises every session) is discoverable automatically.
+    Requires `zeroconf` (pip install zeroconf); returns None if unavailable.
+    """
+    try:
+        from zeroconf import Zeroconf, ServiceBrowser
+    except Exception:  # noqa
+        return None
+    found = {}
+
+    class _Listener:
+        def add_service(self, zc, t, name):
+            info = zc.get_service_info(t, name)
+            if info and info.port:
+                for a in info.addresses:
+                    found[f"{socket.inet_ntoa(a)}:{info.port}"] = True
+
+    zc = None
+    try:
+        zc = Zeroconf()
+        ServiceBrowser(zc, "_adb-tls-connect._tcp.local.", _Listener())
+        for _ in range(timeout * 10):
+            if found:
+                break
+            time.sleep(0.1)
+    except Exception:  # noqa
+        return None
+    finally:
+        try:
+            if zc:
+                zc.close()
+        except Exception:
+            pass
+    return next(iter(found), None)
+
+
+def resolve_device():
+    """Auto-detect the connected adb device; prefer ADB_IP; else last-known."""
+    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    found = []
+    for line in out.splitlines():
+        m = re.search(r"^(\S+)\s+device$", line)
+        if m:
+            found.append(m.group(1))
+    if not found:
+        md = discover_adb_mdns()
+        if md:
+            _save_target(md)
+            return md
+        return _load_target() or os.environ.get("XS_DEVICE") or None
+    for c in found:
+        if c.startswith(ADB_IP):
+            _save_target(c)
+            return c
+    _save_target(found[0])
+    return found[0]
+
+
+def get_device():
+    global ACTIVE_DEVICE
+    if ON_DEVICE:
+        return None
+    if ACTIVE_DEVICE:
+        return ACTIVE_DEVICE
+    ACTIVE_DEVICE = resolve_device()
+    return ACTIVE_DEVICE
 
 
 def cmd(args):
@@ -47,7 +135,7 @@ def cmd(args):
         # Fallback: direct exec (only works for non-input cmds; lacks perms).
         full = ["sh", "-c", " ".join(args)]
     else:
-        full = ["adb", "-s", DEVICE, "shell"] + args
+        full = ["adb", "-s", get_device(), "shell"] + args
     r = subprocess.run(full, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"[cmd err] {' '.join(args)} -> {r.stderr.strip()[:200]}")
@@ -55,20 +143,40 @@ def cmd(args):
 
 
 def adb_connected():
+    t = get_device()
+    if not t:
+        return False
     out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
-    return any(DEVICE in line and "device" in line for line in out.splitlines())
+    return any(t in line and "device" in line for line in out.splitlines())
 
 
 def ensure_connected():
     """Host mode: reconnect if adb dropped (wireless debugging is flaky)."""
+    global ACTIVE_DEVICE
     if ON_DEVICE:
         return True
     if adb_connected():
         return True
-    print(f"[adb] {DEVICE} not connected, reconnecting...")
-    subprocess.run(["adb", "connect", DEVICE], capture_output=True, text=True)
-    time.sleep(2)
-    return adb_connected()
+    target = get_device() or _load_target() or os.environ.get("XS_DEVICE")
+    if target:
+        print(f"[adb] {target} not connected, reconnecting...")
+        subprocess.run(["adb", "connect", target], capture_output=True, text=True)
+        time.sleep(2)
+        ACTIVE_DEVICE = None  # re-resolve after connect
+        if adb_connected():
+            return True
+    # Port may have changed (wireless debugging randomises it) -> rediscover.
+    md = discover_adb_mdns()
+    if md:
+        print(f"[adb] rediscovered device at {md}")
+        _save_target(md)
+        ACTIVE_DEVICE = None
+        subprocess.run(["adb", "connect", md], capture_output=True, text=True)
+        time.sleep(2)
+        return adb_connected()
+    print("[adb] not connected. Run: adb connect <phone-ip>:<port> "
+          "(port from phone's Wireless debugging settings), then retry.")
+    return False
 
 
 def wm_size():
@@ -121,7 +229,7 @@ def dump_ui():
             return None
     p = Path("/tmp/opencode/x_ui.xml")
     if not ON_DEVICE:
-        subprocess.run(["adb", "-s", DEVICE, "pull", "/sdcard/ui.xml", str(p)],
+        subprocess.run(["adb", "-s", get_device(), "pull", "/sdcard/ui.xml", str(p)],
                        capture_output=True)
     try:
         return ET.parse(p).getroot()
@@ -208,10 +316,10 @@ def extract_tweets(root):
 
 
 def run(scrolls=8, tab="For you"):
-    mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {DEVICE}"
+    mode = f"ON-DEVICE (Termux -> adb 127.0.0.1:{LOCAL_ADB_PORT})" if ON_DEVICE else f"host via {get_device()}"
     print(f"[mode: {mode}]")
     if not ON_DEVICE and not ensure_connected():
-        raise SystemExit(f"Cannot reach {DEVICE}. Check wireless debugging / USB.")
+        raise SystemExit("Cannot reach device. Check wireless debugging / USB.")
     # Keep the display on and wake it so wm/uiautomator/input have a window.
     cmd(["input", "keyevent", "KEYCODE_WAKEUP"])
     cmd(["svc", "power", "stayon", "true"])
